@@ -1,5 +1,6 @@
 /* eslint-env jest */
 
+const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
@@ -27,6 +28,23 @@ describe('SentryCli helper', () => {
   test('getPath returns platform-appropriate path', () => {
     const pattern = os.platform() === 'win32' ? /sentry-cli.exe$/ : /sentry-cli$/;
     expect(helper.getPath()).toMatch(pattern);
+  });
+
+  describe('ensureCLIBinaryExists()', () => {
+    it("doesn't error when binary exists", () => {
+      const goodPath = helper.getPath();
+
+      expect(fs.existsSync(goodPath)).toBe(true);
+      expect(() => helper.ensureCLIBinaryExists()).not.toThrow();
+    });
+
+    it("does error when binary doesn't exist", () => {
+      const badPath = 'not/the/right/path';
+      helper.mockBinaryPath(badPath);
+
+      expect(fs.existsSync(badPath)).toBe(false);
+      expect(() => helper.ensureCLIBinaryExists()).toThrow('Cannot find `sentry-cli` executable.');
+    });
   });
 
   describe('`prepare` command', () => {
