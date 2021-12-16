@@ -1,6 +1,7 @@
 'use strict';
 
 const childProcess = require('child_process');
+const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
@@ -109,6 +110,13 @@ function getPath() {
   return binaryPath;
 }
 
+/** Make sure we have a `sentry-cli` binary with which to work. If not, throw an error. */
+function ensureCLIBinaryExists() {
+  if (!fs.existsSync(getPath())) {
+    throw new Error('Cannot find `sentry-cli` executable.');
+  }
+}
+
 /**
  * Runs `sentry-cli` with the given command line arguments.
  *
@@ -190,6 +198,7 @@ function getProjectFlagsFromOptions({ projects = [] } = {}) {
 }
 
 module.exports = {
+  ensureCLIBinaryExists,
   execute,
   getPath,
   getProjectFlagsFromOptions,
