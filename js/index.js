@@ -31,6 +31,8 @@ class SentryCli {
    * @param {Object} [options] More options to pass to the CLI
    */
   constructor(configFile, options) {
+    helper.ensureCLIBinaryExists();
+
     if (typeof configFile === 'string') {
       this.configFile = configFile;
     }
