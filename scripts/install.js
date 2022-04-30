@@ -78,8 +78,9 @@ function getDownloadUrl(platform, arch) {
     case 'win32':
       return `${releasesUrl}-Windows-${archString}.exe`;
     case 'linux':
-    case 'freebsd':
       return `${releasesUrl}-Linux-${archString}`;
+    case 'freebsd':
+      return `https://pkg.kazansoft.ru/download/sentry-cli/${pkgInfo.version}/sentry-cli-FreeBSD-${archString}`;
     default:
       return null;
   }
