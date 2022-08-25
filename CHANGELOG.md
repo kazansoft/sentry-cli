@@ -2,6 +2,137 @@
 
 "You know what they say. Fool me once, strike one, but fool me twice... strike three." — Michael Scott
 
+## 2.5.2
+
+### Various fixes & improvements
+
+- fix: Use direct plist env vars fallback when called within xcode itself (#1311) by @kamilogorek
+
+## 2.5.1
+
+### Various fixes & improvements
+
+- fix: Fallback to xcodebuild vars for faulty Info.plist files (#1310) by @kamilogorek
+- ref: Log warning when debug source excedes item size limit (#1305) by @kamilogorek
+
+## 2.5.0
+
+### Various fixes & improvements
+
+- feat: Allow for selecting frame in sourcemaps explain (#1293) by @kamilogorek
+- misc: 1.74.5 changelog (#1291) by @kamilogorek
+- chore: add missing changelog entry for 1.74.4 (#1289) by @vaind
+
+## 2.4.1
+
+### Various fixes & improvements
+
+- ref: Print better error when processing appcenter paths (#1287) by @kamilogorek
+- fix: Make sure release exists before querying for artifacts (#1284) by @kamilogorek
+
+## 2.4.0
+
+### Various fixes & improvements
+
+- ci: Disable rustup self-update (#1278) by @kamilogorek
+- feat: Add decompress flag to sourcemaps and files upload (#1277) by @kamilogorek
+- feat: Use checksum to dedupe uploaded release artifacts (#1275) by @kamilogorek
+
+## 2.3.1
+
+### Various fixes & improvements
+
+- ref: Dont print install progressbar for nonTTY and CI=1 (#1270) by @kamilogorek
+- fix: move dist option to SentryCliUploadSourceMapsOptions (#1269) by @ikenfin
+
+## 2.3.0
+
+### Various fixes & improvements
+
+- fix: Allow for using --auth-token with login command (#1266) by @kamilogorek
+- deps: Update all Rust dependencies (#1265) by @kamilogorek
+- fix: Increase TempFile robustness on Windows (#1256) (#1263) by @kamilogorek
+- ref: Remove confusing ending dots from command logs (#1261) by @kamilogorek
+- fix: Correct typo in sourcemaps explain output (#1258) by @huwq1987
+- fix: Use first frame that has context-line in explain (#1255) by @kamilogorek
+- feat: Add send-envelope command (#1254) by @kamilogorek
+
+## 2.2.0
+
+### Various fixes & improvements
+
+- feat: Compute and upload il2cpp line mappings (#1248) by @loewenheim
+- ref: Skip protected zip files when uploading debug files (#1245) by @kamilogorek
+
+## 2.1.0
+
+### Source Maps Upload Check "y-tho" (ongoing)
+
+*Problem statement:*
+
+Uploading source maps is a common source of frustration. Source maps are also one of the great value adds to our in product experience. We want to automate supporting customers with frequent issues.
+
+https://docs.sentry.io/platforms/javascript/sourcemaps/troubleshooting_js/
+
+*Outcome: *
+
+Developers will be provided with a tool to help them discover any issues they may have when uploading source maps
+
+Sentry support will have a tool and docs to suggest to customers to hopefully first discover issues, and second at least know what their problem is NOT.
+
+*Key measurements:*
+
+* qualitative: Is this useful for customers and support
+* quantitative: Can we try to influence the number of Zendesk tickets
+* quantitative: Can we influence the resolution time of source maps related Zendesk tickets
+
+Can we find a way to track in zendesk the number of times the sentry-cli “y-tho“ functionality was useful
+
+*Additional*
+
+This is something users would run locally so I do not think we can track usage exactly what was not covered in y-tho
+
+* Verify your source maps are built correctly
+* Verify your source maps work locally
+* Verify your source files are not too large
+  * this is a fuzzy requirement today in sentry
+* Verify artifacts are not gzipped
+* Verify workers are sharing the same volume as web (if running self-hosted Sentry via Docker)
+* Should spit out an easily readable and easily copy and paste - to put into ZenDesk or elsewhere for support colleagues
+
+*Possible second milestone:*
+
+https://github.com/getsentry/rust-sourcemap/tree/master/cli
+
+* In sentry error incorrect source map location
+* this helps when producing sourcemaps locally then line and column
+* this verify that it resolves locally
+  * if yes then it is a problem in between on sentry server side or upload
+  * 1st Verifies what you upload to sentry is exactly what you upload to sentry
+  * 2nd step from “y-tho” ensure previous steps are not for waste
+* What is being automated?
+  * on release page you have your files (release artificats)
+    * download
+    * manually check the line number matches the error
+    * if correct then data is correct
+    * then you know an error with cli and not with the source maps that were uploaded
+
+
+
+By: @kamilogorek (#1235)
+
+### Various fixes & improvements
+
+- ref: Change comment format for find_matching_artifact (#1243) by @kamilogorek
+- ref: Log correct AppCenter error message (#1243) by @kamilogorek
+- fix: Respect no-zips option for debug files upload (#1239) by @saf-e
+- chore: fix recommended VS Code extension name (#1240) by @vaind
+- ref: Rename VERSION to SENTRY_CLI_VERSION in install readme (#1227) by @kamilogorek
+- feat: Add organizations list command (#1213) by @kamilogorek
+- docs(cli): Sync get-cli readme with our docs; add version specifier (#1225) by @kamilogorek
+- test: Add integration tests for projects command (#1212) by @kamilogorek
+- fix: replace git.io links with redirect targets (#1209) by @asottile-sentry
+
 ## 2.0.4
 
 ### Various fixes & improvements
@@ -78,6 +209,20 @@ Breaking changes are denotated with _(breaking)_ tag, and appropriate required c
 - ref: Make `--auth-token` a global argument
 - ref: Make all `ProgressBar` instances and logs always write to `stderr`
 - ref: Migrate error handling from `failure` to `anyhow` crate
+
+## 1.74.5
+
+### Various fixes & improvements
+
+- deps: Add resolution to bump `ansi-regex` to version `^3.0.1` (#1281)
+- ref: Increase `TempFile` robustness on Windows (#1256)
+
+## 1.74.4
+
+### Various fixes & improvements
+
+- ci: Add merge target (f9a2db3) by @kamilogorek
+- ref: Prevent @vercel/nft and similar tools from including binary file in their bundles (#1207) by @kamilogorek
 
 ## 1.74.3
 

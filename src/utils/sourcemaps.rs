@@ -9,6 +9,7 @@ use anyhow::{bail, Error, Result};
 use console::style;
 use indicatif::ProgressStyle;
 use log::{debug, info, warn};
+use sha1_smol::Digest;
 use symbolic::debuginfo::sourcebundle::SourceFileType;
 use url::Url;
 
@@ -142,14 +143,12 @@ fn guess_sourcemap_reference(sourcemaps: &HashSet<String>, min_url: &str) -> Res
         }
     }
 
-    bail!(
-        "Could not auto-detect referenced sourcemap for {}.",
-        min_url
-    );
+    bail!("Could not auto-detect referenced sourcemap for {}", min_url);
 }
 
 pub struct SourceMapProcessor {
     pending_sources: HashSet<(String, ReleaseFileMatch)>,
+    already_uploaded_sources: Vec<Digest>,
     sources: ReleaseFiles,
 }
 
@@ -165,6 +164,7 @@ impl SourceMapProcessor {
     pub fn new() -> SourceMapProcessor {
         SourceMapProcessor {
             pending_sources: HashSet::new(),
+            already_uploaded_sources: Vec::new(),
             sources: HashMap::new(),
         }
     }
@@ -173,6 +173,11 @@ impl SourceMapProcessor {
     pub fn add(&mut self, url: &str, file: ReleaseFileMatch) -> Result<()> {
         self.pending_sources.insert((url.to_string(), file));
         Ok(())
+    }
+
+    /// Adds an already uploaded sources checksum.
+    pub fn add_already_uploaded_source(&mut self, checksum: Digest) {
+        self.already_uploaded_sources.push(checksum);
     }
 
     fn flush_pending_sources(&mut self) {
@@ -194,6 +199,7 @@ impl SourceMapProcessor {
         );
         for (url, mut file) in self.pending_sources.drain() {
             pb.set_message(&url);
+
             let ty = if sourcemap::is_sourcemap_slice(&file.contents) {
                 SourceFileType::SourceMap
             } else if file
@@ -235,6 +241,7 @@ impl SourceMapProcessor {
                     ty,
                     headers: vec![],
                     messages: vec![],
+                    already_uploaded: false,
                 },
             );
             pb.inc(1);
@@ -269,6 +276,14 @@ impl SourceMapProcessor {
                     .bold()
                 );
                 sect = Some(source.ty);
+            }
+
+            if source.already_uploaded {
+                println!(
+                    "    {}",
+                    style(format!("{} (skipped; already uploaded)", &source.url)).yellow()
+                );
+                continue;
             }
 
             if source.ty == SourceFileType::MinifiedSource {
@@ -404,6 +419,7 @@ impl SourceMapProcessor {
                     ty: SourceFileType::MinifiedSource,
                     headers: vec![],
                     messages: vec![],
+                    already_uploaded: false,
                 },
             );
 
@@ -421,6 +437,7 @@ impl SourceMapProcessor {
                     ty: SourceFileType::SourceMap,
                     headers: vec![],
                     messages: vec![],
+                    already_uploaded: false,
                 },
             );
         }
@@ -530,9 +547,20 @@ impl SourceMapProcessor {
         Ok(())
     }
 
+    fn flag_uploaded_sources(&mut self) {
+        for source in self.sources.values_mut() {
+            if let Ok(checksum) = &source.checksum() {
+                if self.already_uploaded_sources.contains(checksum) {
+                    source.already_uploaded = true;
+                }
+            }
+        }
+    }
+
     /// Uploads all files
     pub fn upload(&mut self, context: &UploadContext<'_>) -> Result<()> {
         self.flush_pending_sources();
+        self.flag_uploaded_sources();
         let mut uploader = ReleaseFileUpload::new(context);
         uploader.files(&self.sources);
         uploader.upload()?;

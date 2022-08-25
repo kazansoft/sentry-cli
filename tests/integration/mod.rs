@@ -1,11 +1,15 @@
 mod bash_hook;
 mod debug_files;
 mod deploys;
+mod events;
 mod help;
 mod info;
 mod login;
 mod monitors;
+mod organizations;
+mod projects;
 mod releases;
+mod send_envelope;
 mod send_event;
 mod sourcemaps;
 mod uninstall;

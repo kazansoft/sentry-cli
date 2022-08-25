@@ -1,9 +1,11 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 
-use anyhow::Result;
+use anyhow::{format_err, Result};
 use clap::{Arg, ArgMatches, Command};
 use glob::{glob_with, MatchOptions};
 use log::{debug, warn};
+use sha1_smol::Digest;
 
 use crate::api::{Api, NewRelease};
 use crate::config::Config;
@@ -48,6 +50,11 @@ pub fn make_command(command: Command) -> Command {
             Arg::new("validate")
                 .long("validate")
                 .help("Enable basic sourcemap validation."),
+        )
+        .arg(
+            Arg::new("decompress")
+                .long("decompress")
+                .help("Enable files gzip decompression prior to upload."),
         )
         .arg(
             Arg::new("wait")
@@ -256,6 +263,7 @@ fn process_sources_from_paths(
         };
 
         let mut search = ReleaseFileSearch::new(path.to_path_buf());
+        search.decompress(matches.is_present("decompress"));
 
         if check_ignore {
             search
@@ -318,6 +326,13 @@ pub fn execute(matches: &ArgMatches) -> Result<()> {
             ..Default::default()
         },
     )?;
+
+    for artifact in api.list_release_files(&org, Some(&project), &release.version)? {
+        let checksum = Digest::from_str(&artifact.sha1)
+            .map_err(|_| format_err!("Invalid artifact checksum"))?;
+
+        processor.add_already_uploaded_source(checksum);
+    }
 
     processor.upload(&UploadContext {
         org: &org,

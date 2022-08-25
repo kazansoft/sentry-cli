@@ -20,16 +20,19 @@ macro_rules! each_subcommand {
         $mac!(bash_hook);
         $mac!(debug_files);
         $mac!(deploys);
+        $mac!(events);
         $mac!(files);
         $mac!(info);
         $mac!(issues);
         $mac!(login);
         $mac!(monitors);
+        $mac!(organizations);
         $mac!(projects);
         $mac!(react_native);
         $mac!(releases);
         $mac!(repos);
         $mac!(send_event);
+        $mac!(send_envelope);
         $mac!(sourcemaps);
         #[cfg(not(feature = "managed"))]
         $mac!(uninstall);
@@ -60,10 +63,12 @@ to learn more about them.";
 const UPDATE_NAGGER_CMDS: &[&str] = &[
     "debug-files",
     "deploys",
+    "events",
     "files",
     "info",
     "issues",
     "login",
+    "organizations",
     "projects",
     "releases",
     "repos",

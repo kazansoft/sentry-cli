@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{create_dir_all, File};
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -20,15 +20,14 @@ use backoff::backoff::Backoff;
 use brotli2::write::BrotliEncoder;
 use chrono::{DateTime, Duration, FixedOffset, Utc};
 use clap::ArgMatches;
-use console::style;
 use flate2::write::GzEncoder;
 use if_chain::if_chain;
-use indicatif::ProgressStyle;
 use lazy_static::lazy_static;
 use log::{debug, info, warn};
 use parking_lot::{Mutex, RwLock};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use regex::{Captures, Regex};
+use sentry::protocol::{Exception, Values};
 use serde::de::{DeserializeOwned, Deserializer};
 use serde::{Deserialize, Serialize};
 use sha1_smol::Digest;
@@ -40,6 +39,7 @@ use uuid::Uuid;
 use crate::config::{Auth, Config};
 use crate::constants::{ARCH, EXT, PLATFORM, RELEASE_REGISTRY_LATEST_URL, VERSION};
 use crate::utils::android::AndroidManifest;
+use crate::utils::file_upload::UploadContext;
 use crate::utils::http::{self, is_absolute_url, parse_link_header};
 use crate::utils::progress::ProgressBar;
 use crate::utils::retry::{get_default_backoff, DurationAsMilliseconds};
@@ -49,13 +49,6 @@ use crate::utils::xcode::InfoPlist;
 
 const QUERY_ENCODE_SET: AsciiSet = CONTROLS.add(b' ').add(b'"').add(b'#').add(b'<').add(b'>');
 const DEFAULT_ENCODE_SET: AsciiSet = QUERY_ENCODE_SET.add(b'`').add(b'?').add(b'{').add(b'}');
-
-/// Represents file contents temporarily
-#[derive(Clone, Debug)]
-pub enum FileContents<'a> {
-    FromPath(&'a Path),
-    FromBytes(&'a [u8]),
-}
 
 /// Wrapper that escapes arguments for URL path segments.
 pub struct PathArg<A: fmt::Display>(A);
@@ -301,7 +294,7 @@ impl From<curl::FormError> for ApiError {
 pub type ApiResult<T> = Result<T, ApiError>;
 
 /// Represents an HTTP method that is used by the API.
-#[derive(PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug)]
 pub enum Method {
     Get,
     Head,
@@ -534,6 +527,73 @@ impl Api {
         Ok(rv)
     }
 
+    /// Get a single release file and store it inside provided descriptor.
+    pub fn get_release_file(
+        &self,
+        org: &str,
+        project: Option<&str>,
+        version: &str,
+        file_id: &str,
+        file_desc: &mut File,
+    ) -> Result<(), ApiError> {
+        let path = if let Some(project) = project {
+            format!(
+                "/projects/{}/{}/releases/{}/files/{}/?download=1",
+                PathArg(org),
+                PathArg(project),
+                PathArg(version),
+                PathArg(file_id)
+            )
+        } else {
+            format!(
+                "/organizations/{}/releases/{}/files/{}/?download=1",
+                PathArg(org),
+                PathArg(version),
+                PathArg(file_id)
+            )
+        };
+
+        let resp = self.download(&path, file_desc)?;
+        if resp.status() == 404 {
+            resp.convert_rnf(ApiErrorKind::ResourceNotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Get a single release file metadata.
+    pub fn get_release_file_metadata(
+        &self,
+        org: &str,
+        project: Option<&str>,
+        version: &str,
+        file_id: &str,
+    ) -> ApiResult<Option<Artifact>> {
+        let path = if let Some(project) = project {
+            format!(
+                "/projects/{}/{}/releases/{}/files/{}/",
+                PathArg(org),
+                PathArg(project),
+                PathArg(version),
+                PathArg(file_id)
+            )
+        } else {
+            format!(
+                "/organizations/{}/releases/{}/files/{}/",
+                PathArg(org),
+                PathArg(version),
+                PathArg(file_id)
+            )
+        };
+
+        let resp = self.get(&path)?;
+        if resp.status() == 404 {
+            Ok(None)
+        } else {
+            resp.convert()
+        }
+    }
+
     /// Deletes a single release file.  Returns `true` if the file was
     /// deleted or `false` otherwise.
     pub fn delete_release_file(
@@ -601,48 +661,39 @@ impl Api {
 
     /// Uploads a new release file.  The file is loaded directly from the file
     /// system and uploaded as `name`.
-    // TODO: Simplify this function interface
-    #[allow(clippy::too_many_arguments)]
     pub fn upload_release_file(
         &self,
-        org: &str,
-        project: Option<&str>,
-        version: &str,
-        contents: &FileContents,
+        context: &UploadContext,
+        contents: &[u8],
         name: &str,
-        dist: Option<&str>,
         headers: Option<&[(String, String)]>,
         progress_bar_mode: ProgressBarMode,
     ) -> ApiResult<Option<Artifact>> {
-        let path = if let Some(project) = project {
+        let path = if let Some(project) = context.project {
             format!(
                 "/projects/{}/{}/releases/{}/files/",
-                PathArg(org),
+                PathArg(context.org),
                 PathArg(project),
-                PathArg(version)
+                PathArg(context.release)
             )
         } else {
             format!(
                 "/organizations/{}/releases/{}/files/",
-                PathArg(org),
-                PathArg(version)
+                PathArg(context.org),
+                PathArg(context.release)
             )
         };
         let mut form = curl::easy::Form::new();
-        match contents {
-            FileContents::FromPath(path) => {
-                form.part("file").file(path).add()?;
-            }
-            FileContents::FromBytes(bytes) => {
-                let filename = Path::new(name)
-                    .file_name()
-                    .and_then(OsStr::to_str)
-                    .unwrap_or("unknown.bin");
-                form.part("file").buffer(filename, bytes.to_vec()).add()?;
-            }
-        }
+
+        let filename = Path::new(name)
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("unknown.bin");
+        form.part("file")
+            .buffer(filename, contents.to_vec())
+            .add()?;
         form.part("name").contents(name.as_bytes()).add()?;
-        if let Some(dist) = dist {
+        if let Some(dist) = context.dist {
             form.part("dist").contents(dist.as_bytes()).add()?;
         }
 
@@ -672,90 +723,6 @@ impl Api {
         } else {
             resp.convert_rnf(ApiErrorKind::ReleaseNotFound)
         }
-    }
-
-    pub fn upload_release_files(
-        &self,
-        org: &str,
-        project: Option<&str>,
-        version: &str,
-        sources: HashSet<(String, PathBuf)>,
-        dist: Option<&str>,
-        headers: Option<&[(String, String)]>,
-    ) -> Result<(), ApiError> {
-        if sources.is_empty() {
-            return Ok(());
-        }
-
-        let mut successful_req = vec![];
-        let mut failed_req = vec![];
-
-        println!(
-            "{} Uploading {} files for release {}",
-            style(">").dim(),
-            style(sources.len()).cyan(),
-            style(version).cyan()
-        );
-
-        let pb = ProgressBar::new(sources.len());
-        pb.set_style(ProgressStyle::default_bar().template(&format!(
-            "{} {{msg}}\n{{wide_bar}} {{pos}}/{{len}}",
-            style(">").cyan()
-        )));
-
-        for (url, path) in sources {
-            pb.set_message(path.to_str().unwrap());
-
-            let upload_result = self.upload_release_file(
-                org,
-                project,
-                version,
-                &FileContents::FromPath(&path),
-                &url.to_owned(),
-                dist,
-                headers,
-                ProgressBarMode::Disabled,
-            );
-
-            match upload_result {
-                Ok(Some(artifact)) => {
-                    successful_req.push((path, artifact));
-                }
-                Ok(None) => {
-                    failed_req.push((path, url, String::from("File already present")));
-                }
-                Err(err) => {
-                    failed_req.push((path, url, err.to_string()));
-                }
-            };
-
-            pb.inc(1);
-        }
-
-        pb.finish_and_clear();
-
-        for (path, url, reason) in failed_req.iter() {
-            println!(
-                "    Failed to upload: {} as {} ({})",
-                &path.display(),
-                &url,
-                reason
-            );
-        }
-
-        for (path, artifact) in successful_req.iter() {
-            println!(
-                "    Successfully uploaded: {} as {} ({}) ({} bytes)",
-                &path.display(),
-                artifact.name,
-                artifact.sha1,
-                artifact.size
-            );
-        }
-
-        println!("{} Done uploading.", style(">").dim());
-
-        Ok(())
     }
 
     /// Creates a new release.
@@ -1334,6 +1301,30 @@ impl Api {
         }
     }
 
+    /// List all organizations associated with the authenticated token
+    pub fn list_organizations(&self) -> ApiResult<Vec<Organization>> {
+        let mut rv = vec![];
+        let mut cursor = "".to_string();
+        loop {
+            let resp = self.get(&format!("/organizations/?cursor={}", QueryArg(&cursor)))?;
+            if resp.status() == 404 || (resp.status() == 400 && !cursor.is_empty()) {
+                if rv.is_empty() {
+                    return Err(ApiErrorKind::ResourceNotFound.into());
+                } else {
+                    break;
+                }
+            }
+            let pagination = resp.pagination();
+            rv.extend(resp.convert::<Vec<Organization>>()?.into_iter());
+            if let Some(next) = pagination.into_next_cursor() {
+                cursor = next;
+            } else {
+                break;
+            }
+        }
+        Ok(rv)
+    }
+
     /// List all monitors associated with an organization
     pub fn list_organization_monitors(&self, org: &str) -> ApiResult<Vec<Monitor>> {
         let mut rv = vec![];
@@ -1423,6 +1414,52 @@ impl Api {
         Ok(rv)
     }
 
+    /// List all events associated with an organization and a project
+    pub fn list_organization_project_events(
+        &self,
+        org: &str,
+        project: &str,
+        max_pages: usize,
+    ) -> ApiResult<Vec<ProcessedEvent>> {
+        let mut rv = vec![];
+        let mut cursor = "".to_string();
+        let mut requests_no = 0;
+
+        loop {
+            requests_no += 1;
+
+            let resp = self.get(&format!(
+                "/projects/{}/{}/events/?cursor={}",
+                PathArg(org),
+                PathArg(project),
+                QueryArg(&cursor)
+            ))?;
+
+            if resp.status() == 404 || (resp.status() == 400 && !cursor.is_empty()) {
+                if rv.is_empty() {
+                    return Err(ApiErrorKind::OrganizationNotFound.into());
+                } else {
+                    break;
+                }
+            }
+
+            let pagination = resp.pagination();
+            rv.extend(resp.convert::<Vec<ProcessedEvent>>()?.into_iter());
+
+            if requests_no == max_pages {
+                break;
+            }
+
+            if let Some(next) = pagination.into_next_cursor() {
+                cursor = next;
+            } else {
+                break;
+            }
+        }
+
+        Ok(rv)
+    }
+
     /// List all repos associated with an organization
     pub fn list_organization_repos(&self, org: &str) -> ApiResult<Vec<Repo>> {
         let mut rv = vec![];
@@ -1447,6 +1484,37 @@ impl Api {
             }
         }
         Ok(rv)
+    }
+
+    /// Looks up an event, which was already processed by Sentry and returns it.
+    /// If it does not exist `None` will be returned.
+    pub fn get_event(
+        &self,
+        org: &str,
+        project: Option<&str>,
+        event_id: &str,
+    ) -> ApiResult<Option<ProcessedEvent>> {
+        let path = if let Some(project) = project {
+            format!(
+                "/projects/{}/{}/events/{}/json/",
+                PathArg(org),
+                PathArg(project),
+                PathArg(event_id)
+            )
+        } else {
+            format!(
+                "/organizations/{}/events/{}/json/",
+                PathArg(org),
+                PathArg(event_id)
+            )
+        };
+
+        let resp = self.get(&path)?;
+        if resp.status() == 404 {
+            Ok(None)
+        } else {
+            resp.convert()
+        }
     }
 }
 
@@ -1987,7 +2055,7 @@ pub struct AuthInfo {
 }
 
 /// A release artifact
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 pub struct Artifact {
     pub id: String,
     pub sha1: String,
@@ -2249,6 +2317,22 @@ pub struct AssociateDsymsResponse {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct Organization {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    #[serde(rename = "dateCreated")]
+    pub date_created: DateTime<Utc>,
+    #[serde(rename = "isEarlyAdopter")]
+    pub is_early_adopter: bool,
+    #[serde(rename = "require2FA")]
+    pub require_2fa: bool,
+    #[serde(rename = "requireEmailVerification")]
+    pub require_email_verification: bool,
+    pub features: Vec<String>,
+}
+
+#[derive(Deserialize, Debug)]
 pub struct Team {
     pub id: String,
     pub slug: String,
@@ -2427,6 +2511,9 @@ pub enum ChunkUploadCapability {
     /// Upload of BCSymbolMap and PList auxiliary DIFs
     BcSymbolmap,
 
+    /// Upload of il2cpp line mappings
+    Il2Cpp,
+
     /// Any other unsupported capability (ignored)
     Unknown,
 }
@@ -2442,6 +2529,7 @@ impl<'de> Deserialize<'de> for ChunkUploadCapability {
             "pdbs" => ChunkUploadCapability::Pdbs,
             "sources" => ChunkUploadCapability::Sources,
             "bcsymbolmaps" => ChunkUploadCapability::BcSymbolmap,
+            "il2cpp" => ChunkUploadCapability::Il2Cpp,
             _ => ChunkUploadCapability::Unknown,
         })
     }
@@ -2558,4 +2646,73 @@ pub struct GitCommit {
     pub timestamp: DateTime<FixedOffset>,
     pub message: Option<String>,
     pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ProcessedEvent {
+    #[serde(alias = "eventID")]
+    pub event_id: Uuid,
+    #[serde(default, alias = "dateCreated")]
+    pub date_created: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dist: Option<String>,
+    #[serde(default, skip_serializing_if = "Values::is_empty")]
+    pub exception: Values<Exception>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<ProcessedEventUser>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<ProcessedEventTag>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ProcessedEventUser {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip_address: Option<String>,
+}
+
+impl fmt::Display for ProcessedEventUser {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if let Some(id) = &self.id {
+            write!(f, "ID: {}", id)?;
+        }
+
+        if let Some(username) = &self.username {
+            write!(f, "Username: {}", username)?;
+        }
+
+        if let Some(email) = &self.email {
+            write!(f, "Email: {}", email)?;
+        }
+
+        if let Some(ip_address) = &self.ip_address {
+            write!(f, "IP: {}", ip_address)?;
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ProcessedEventTag {
+    pub key: String,
+    pub value: String,
+}
+
+impl fmt::Display for ProcessedEventTag {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}: {}", &self.key, &self.value)?;
+        Ok(())
+    }
 }

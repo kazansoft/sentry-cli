@@ -5,6 +5,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
+use flate2::read::GzDecoder;
+use log::error;
 use sha1_smol::{Digest, Sha1};
 use uuid::Uuid;
 
@@ -21,7 +23,7 @@ impl TempDir {
     /// Creates a new tempdir
     pub fn create() -> io::Result<Self> {
         let mut path = env::temp_dir();
-        path.push(Uuid::new_v4().to_hyphenated_ref().to_string());
+        path.push(Uuid::new_v4().as_hyphenated().to_string());
         fs::create_dir(&path)?;
         Ok(TempDir { path })
     }
@@ -48,7 +50,7 @@ impl TempFile {
     /// Creates a new tempfile.
     pub fn create() -> io::Result<Self> {
         let mut path = env::temp_dir();
-        path.push(Uuid::new_v4().to_hyphenated_ref().to_string());
+        path.push(Uuid::new_v4().as_hyphenated().to_string());
 
         let tf = TempFile { path };
         tf.open()?;
@@ -58,7 +60,7 @@ impl TempFile {
     /// Assumes ownership over an existing file and moves it to a temp location.
     pub fn take<P: AsRef<Path>>(path: P) -> io::Result<TempFile> {
         let mut destination = env::temp_dir();
-        destination.push(Uuid::new_v4().to_hyphenated_ref().to_string());
+        destination.push(Uuid::new_v4().as_hyphenated().to_string());
 
         fs::rename(&path, &destination)?;
         Ok(TempFile { path: destination })
@@ -88,8 +90,36 @@ impl TempFile {
 }
 
 impl Drop for TempFile {
+    #[cfg(not(windows))]
     fn drop(&mut self) {
-        fs::remove_file(&self.path).ok();
+        let result = fs::remove_file(&self.path);
+        if let Err(e) = result {
+            error!(
+                "Failed to delete TempFile {}: {:?}",
+                &self.path.display(),
+                e
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    fn drop(&mut self) {
+        // On Windows, we open the file handle to set "FILE_FLAG_DELETE_ON_CLOSE" so that it will be closed
+        // when the last open handle to this file is gone.
+        use std::os::windows::prelude::*;
+        use winapi::um::winbase::FILE_FLAG_DELETE_ON_CLOSE;
+        let result = fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+            .open(&self.path);
+
+        if let Err(e) = result {
+            error!(
+                "Failed to open {} to flag for delete: {:?}",
+                &self.path.display(),
+                e
+            );
+        }
     }
 }
 
@@ -157,6 +187,21 @@ pub fn get_sha1_checksums(data: &[u8], chunk_size: u64) -> Result<(Digest, Vec<D
     Ok((total_sha.digest(), chunks))
 }
 
+/// Checks if provided slice contains gzipped data.
+pub fn is_gzip_compressed(slice: &[u8]) -> bool {
+    // Per https://www.ietf.org/rfc/rfc1952.txt
+    const GZIP_MAGIC: [u8; 2] = [0x1F, 0x8B];
+    slice.starts_with(&GZIP_MAGIC)
+}
+
+/// Gets gzip decompressed contents.
+pub fn decompress_gzip_content(slice: &[u8]) -> Result<Vec<u8>> {
+    let mut decoder = GzDecoder::new(slice);
+    let mut decoded = vec![];
+    decoder.read_to_end(&mut decoded)?;
+    Ok(decoded)
+}
+
 #[cfg(windows)]
 pub fn path_as_url(path: &Path) -> String {
     path.display().to_string().replace("\\", "/")
@@ -165,4 +210,46 @@ pub fn path_as_url(path: &Path) -> String {
 #[cfg(not(windows))]
 pub fn path_as_url(path: &Path) -> String {
     path.display().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tempfile_goes_away() -> io::Result<()> {
+        let tempfile = TempFile::create()?;
+        let path = tempfile.path().to_owned();
+        assert!(
+            path.exists(),
+            "{} should exist after creating Tempfile",
+            path.display()
+        );
+
+        drop(tempfile);
+        assert!(!path.exists(), "File didn't get deleted");
+
+        Ok(())
+    }
+
+    #[test]
+    fn tempfile_goes_away_with_longer_living_handle() -> io::Result<()> {
+        let tempfile = TempFile::create()?;
+        let path = tempfile.path().to_owned();
+        assert!(
+            path.exists(),
+            "{} should exist after creating Tempfile",
+            path.display()
+        );
+
+        // Create a handle to the file that outlives the TempFile object (which means that
+        // the `Drop` impl will run before our handle is closed).
+        let handle = tempfile.open()?;
+        drop(tempfile);
+
+        drop(handle);
+        assert!(!path.exists(), "{} didn't get deleted", path.display());
+
+        Ok(())
+    }
 }

@@ -1,6 +1,11 @@
 <p align="center">
-    <img src="https://sentry-brand.storage.googleapis.com/sentry-logo-black.png" width="280">
-    <br />
+  <a href="https://sentry.io/?utm_source=github&utm_medium=logo" target="_blank">
+    <picture>
+      <source srcset="https://sentry-brand.storage.googleapis.com/sentry-logo-white.png" media="(prefers-color-scheme: dark)" />
+      <source srcset="https://sentry-brand.storage.googleapis.com/sentry-logo-black.png" media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)" />
+      <img src="https://sentry-brand.storage.googleapis.com/sentry-logo-black.png" alt="Sentry" width="280">
+    </picture>
+  </a>
 </p>
 
 # Official Sentry Command Line Interface
@@ -20,9 +25,20 @@ fastlane tools.
 
 ## Installation
 
-The recommended way to install is with everybody's favorite curl to bash:
+If you are on OS X or Linux, you can use the automated downloader which will fetch the latest release version for you and install it:
 
     curl -sL https://sentry.io/get-cli/ | bash
+
+We do however, encourage you to pin the specific version of the CLI, so your builds are always reproducible.
+To do that, you can use the exact same method, with an additional version specifier:
+
+    curl -sL https://sentry.io/get-cli/ | SENTRY_CLI_VERSION=2.0.4 bash
+
+This will automatically download the correct version of `sentry-cli` for your operating system and install it. If necessary, it will prompt for your admin password for `sudo`. For a different installation location or for systems without `sudo` (like Windows), you can `export INSTALL_DIR=/custom/installation/path` before running this command.
+
+To verify it’s installed correctly you can bring up the help:
+
+    sentry-cli --help
 
 ### Node
 
