@@ -2,7 +2,7 @@ use std::io::Read;
 use std::path::Path;
 
 use anyhow::{bail, format_err, Result};
-use clap::{Arg, ArgMatches, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command};
 use console::style;
 use sentry::protocol::{Frame, Stacktrace};
 use url::Url;
@@ -35,6 +35,7 @@ pub fn make_command(command: Command) -> Command {
             Arg::new("force")
                 .long("force")
                 .short('f')
+                .action(ArgAction::SetTrue)
                 .help("Force full validation flow, even when event is already source mapped."),
         )
 }
@@ -43,38 +44,38 @@ fn tip<S>(msg: S)
 where
     S: std::fmt::Display,
 {
-    println!("{}", style(format!("ℹ {}", msg)).blue());
+    println!("{}", style(format!("ℹ {msg}")).blue());
 }
 
 fn success<S>(msg: S)
 where
     S: std::fmt::Display,
 {
-    println!("{}", style(format!("✔ {}", msg)).green());
+    println!("{}", style(format!("✔ {msg}")).green());
 }
 
 fn warning<S>(msg: S)
 where
     S: std::fmt::Display,
 {
-    println!("{}", style(format!("⚠ {}", msg)).yellow());
+    println!("{}", style(format!("⚠ {msg}")).yellow());
 }
 
 fn error<S>(msg: S)
 where
     S: std::fmt::Display,
 {
-    println!("{}", style(format!("✖ {}", msg)).red());
+    println!("{}", style(format!("✖ {msg}")).red());
 }
 
 fn fetch_event(org: &str, project: &str, event_id: &str) -> Result<ProcessedEvent> {
     match Api::current().get_event(org, Some(project), event_id)? {
         Some(event) => {
-            success(format!("Fetched data for event: {}", event_id));
+            success(format!("Fetched data for event: {event_id}"));
             Ok(event)
         }
         None => {
-            error(format!("Could not retrieve event {}", event_id));
+            error(format!("Could not retrieve event {event_id}"));
             tip("Make sure that event ID you used is valid.");
             Err(QuietExit(1).into())
         }
@@ -132,38 +133,14 @@ fn fetch_release_artifacts(org: &str, project: &str, release: &str) -> Result<Ve
 
 // Try to find an artifact which matches the path part of the url extracted from the stacktrace frame,
 // prefixed with the default `~/`, which is a "glob-like" pattern for matchin any hostname.
-//
-// We only need the `pathname` portion of the url, so if it's absolute, just extract it.
-// If it's relative however, parse any random url (example.com) and join it with our relative url,
-// as Rust cannot handle parsing of relative urls.
-//
-// http://localhost:5000/dist/bundle.min.js => ~/dist/bundle.min.js
-// /dist/bundle.js.map => ~/dist/bundle.js.map
-// okboomer => error (invalid relative path, no extension)
-//
-// It should be more generic than using the defaults, but should be sufficient for our current usecase.
-fn find_matching_artifact(artifacts: &[Artifact], abs_path: &str) -> Result<Artifact> {
-    let abs_path = match Url::parse(abs_path) {
-        Ok(path) => Ok(path),
-        Err(_) => {
-            let base = Url::parse("http://example.com").unwrap();
-            base.join(abs_path)
-                .map_err(|_| format_err!("Cannot parse source map url {}", abs_path))
-        }
-    }?;
-    let mut filename = String::from("~");
-    filename.push_str(abs_path.path());
-
-    let full_match = artifacts.iter().find(|a| a.name == filename);
+fn find_matching_artifact(artifacts: &[Artifact], path: &str) -> Result<Artifact> {
+    let full_match = artifacts.iter().find(|a| a.name == path);
     let partial_match = artifacts
         .iter()
-        .find(|a| a.name.ends_with(filename.split('/').last().unwrap()));
+        .find(|a| a.name.ends_with(path.split('/').last().unwrap()));
 
     if full_match.is_none() {
-        error(format!(
-            "Uploaded artifacts do not include entry: {}",
-            filename
-        ));
+        error(format!("Uploaded artifacts do not include entry: {path}"));
 
         if let Some(pm) = partial_match {
             tip(format!(
@@ -176,7 +153,7 @@ fn find_matching_artifact(artifacts: &[Artifact], abs_path: &str) -> Result<Arti
         return Err(QuietExit(1).into());
     }
 
-    success(format!("Artifact {} found.", filename));
+    success(format!("Artifact {path} found."));
     Ok(full_match.cloned().unwrap())
 }
 
@@ -318,7 +295,7 @@ fn print_mapped_frame(frame: &Frame) {
             frame
                 .pre_context
                 .iter()
-                .map(|l| format!("  {}", l))
+                .map(|l| format!("  {l}"))
                 .collect::<Vec<String>>()
                 .join("\n")
         )
@@ -334,7 +311,7 @@ fn print_mapped_frame(frame: &Frame) {
             frame
                 .post_context
                 .iter()
-                .map(|l| format!("  {}", l))
+                .map(|l| format!("  {l}"))
                 .collect::<Vec<String>>()
                 .join("\n")
         )
@@ -344,7 +321,7 @@ fn print_mapped_frame(frame: &Frame) {
 
 fn extract_release(event: &ProcessedEvent) -> Result<String> {
     if let Some(release) = event.release.as_ref() {
-        success(format!("Event has release name: {}", release));
+        success(format!("Event has release name: {release}"));
         Ok(release.to_string())
     } else {
         error("Event is missing a release name");
@@ -355,10 +332,38 @@ fn extract_release(event: &ProcessedEvent) -> Result<String> {
     }
 }
 
+fn resolve_sourcemap_url(abs_path: &str, sourcemap_location: &str) -> Result<String> {
+    let base = Url::parse(abs_path)?;
+    base.join(sourcemap_location)
+        .map(|url| url.to_string())
+        .map_err(|e| e.into())
+}
+
+// Unify url to be prefixed with the default `~/`, which is a "glob-like" pattern for matchin any hostname.
+//
+// We only need the `pathname` portion of the url, so if it's absolute, just extract it.
+// If it's relative however, parse any random url (example.com) and join it with our relative url,
+// as Rust cannot handle parsing of relative urls.
+//
+// It should be more generic than using the defaults, but should be sufficient for our current usecase.
+fn unify_artifact_url(abs_path: &str) -> Result<String> {
+    let abs_path = match Url::parse(abs_path) {
+        Ok(path) => Ok(path),
+        Err(_) => {
+            let base = Url::parse("http://example.com").unwrap();
+            base.join(abs_path)
+                .map_err(|_| format_err!("Cannot parse source map url {}", abs_path))
+        }
+    }?;
+    let mut filename = String::from("~");
+    filename.push_str(abs_path.path());
+    Ok(filename)
+}
+
 pub fn execute(matches: &ArgMatches) -> Result<()> {
     let config = Config::current();
     let (org, project) = config.get_org_and_project(matches)?;
-    let event_id = matches.value_of("event").unwrap();
+    let event_id = matches.get_one::<String>("event").unwrap();
 
     let event = fetch_event(&org, &project, event_id)?;
     let release = extract_release(&event)?;
@@ -383,7 +388,7 @@ pub fn execute(matches: &ArgMatches) -> Result<()> {
         })?;
 
     if exception.raw_stacktrace.is_some() {
-        if matches.is_present("force") {
+        if matches.get_flag("force") {
             warning(
                 "Exception is already source mapped, however 'force' flag was used. Moving along.",
             );
@@ -408,8 +413,9 @@ pub fn execute(matches: &ArgMatches) -> Result<()> {
         }
     }
 
+    let abs_path = frame.abs_path.as_ref().expect("Incorrect abs_path value");
     let artifacts = fetch_release_artifacts(&org, &project, &release)?;
-    let matched_artifact = find_matching_artifact(&artifacts, frame.abs_path.as_ref().unwrap())?;
+    let matched_artifact = find_matching_artifact(&artifacts, &unify_artifact_url(abs_path)?)?;
 
     verify_dists_matches(&matched_artifact, event.dist.as_deref())?;
 
@@ -420,9 +426,15 @@ pub fn execute(matches: &ArgMatches) -> Result<()> {
                 QuietExit(1)
             },
         )?;
-    success(format!("Found source map location: {}", sourcemap_location));
+    success(format!(
+        "Found source map location: {}",
+        &sourcemap_location
+    ));
 
-    let sourcemap_artifact = find_matching_artifact(&artifacts, &sourcemap_location)?;
+    let sourcemap_url = unify_artifact_url(&resolve_sourcemap_url(abs_path, &sourcemap_location)?)?;
+    success(format!("Resolved source map url: {}", &sourcemap_url));
+
+    let sourcemap_artifact = find_matching_artifact(&artifacts, &sourcemap_url)?;
     verify_dists_matches(&sourcemap_artifact, event.dist.as_deref())?;
 
     let sourcemap_file =
@@ -430,8 +442,8 @@ pub fn execute(matches: &ArgMatches) -> Result<()> {
 
     print_sourcemap(
         &sourcemap_file,
-        frame.lineno.unwrap() as u32 - 1,
-        frame.colno.unwrap() as u32 - 1,
+        frame.lineno.expect("Event frame is missing line number") as u32 - 1,
+        frame.colno.expect("Event frame is missing column number") as u32 - 1,
     )
     .map_err(|err| {
         error(err);
@@ -440,4 +452,54 @@ pub fn execute(matches: &ArgMatches) -> Result<()> {
 
     success("Source Maps should be working fine. Have you tried turning it off and on again?");
     Ok(())
+}
+
+#[test]
+fn test_resolve_sourcemap_url() {
+    // Tests coming from `tests/sentry/utils/test_urls.py` in `getsentry/sentry`
+    let cases = vec![
+        ("http://example.com/foo", "bar", "http://example.com/bar"),
+        ("http://example.com/foo", "/bar", "http://example.com/bar"),
+        ("https://example.com/foo", "/bar", "https://example.com/bar"),
+        (
+            "http://example.com/foo/baz",
+            "bar",
+            "http://example.com/foo/bar",
+        ),
+        (
+            "http://example.com/foo/baz",
+            "/bar",
+            "http://example.com/bar",
+        ),
+        ("aps://example.com/foo", "/bar", "aps://example.com/bar"),
+        (
+            "apsunknown://example.com/foo",
+            "/bar",
+            "apsunknown://example.com/bar",
+        ),
+        (
+            "apsunknown://example.com/foo",
+            "//aha/uhu",
+            "apsunknown://aha/uhu",
+        ),
+    ];
+
+    for (base, to_join, expected) in cases {
+        assert_eq!(resolve_sourcemap_url(base, to_join).unwrap(), expected);
+    }
+}
+
+#[test]
+fn test_unify_artifact_url() {
+    let cases = vec![
+        (
+            "http://localhost:5000/dist/bundle.min.js",
+            "~/dist/bundle.min.js",
+        ),
+        ("/dist/bundle.js.map", "~/dist/bundle.js.map"),
+    ];
+
+    for (path, expected) in cases {
+        assert_eq!(unify_artifact_url(path).unwrap(), expected);
+    }
 }

@@ -1,10 +1,10 @@
 target
 .DS_Store
-.sentryclirc
 .cargo
 node_modules
 coverage
 dist
+dump
 checksums.txt
 
 /sentry-cli
